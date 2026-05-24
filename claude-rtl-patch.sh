@@ -74,7 +74,7 @@ ensure_node() {
   esac
   local node_dir="$STATE_DIR/node-v$LOCAL_NODE_VERSION-$arch_id"
   if [ ! -x "$node_dir/bin/node" ]; then
-    step "No usable Node found. Bootstrapping local Node $LOCAL_NODE_VERSION (~30 MB, one-time)…"
+    step "No usable Node found. Bootstrapping local Node $LOCAL_NODE_VERSION (~30 MB, one-time)..."
     mkdir -p "$STATE_DIR"
     local url="https://nodejs.org/dist/v$LOCAL_NODE_VERSION/node-v$LOCAL_NODE_VERSION-$arch_id.tar.gz"
     curl -fsSL "$url" | tar -xz -C "$STATE_DIR" \
@@ -109,7 +109,7 @@ ensure_asar_tool() {
     installer_name="npm";  installer_cmd="$NPM_BIN i"
   fi
 
-  step "Installing @electron/asar via ${installer_name}…"
+  step "Installing @electron/asar via ${installer_name}..."
   # shellcheck disable=SC2086
   ( cd "$TOOL_DIR" && $installer_cmd '@electron/asar@^3' >/dev/null 2>&1 ) \
     || die "Failed to install @electron/asar into ${TOOL_DIR} (using ${installer_name})"
@@ -121,7 +121,7 @@ asar_run() {
 }
 
 quit_claude() {
-  step "Quitting Claude…"
+  step "Quitting Claude..."
   osascript -e 'tell application "Claude" to quit' 2>/dev/null || true
   # Wait up to 5s for it to actually exit
   for _ in 1 2 3 4 5; do
@@ -203,7 +203,7 @@ cmd_apply() {
   step "Extracting asar → $WORK"
   asar_run extract "$ASAR" "$WORK"
 
-  step "Writing RTL injector module…"
+  step "Writing RTL injector module..."
   cat > "$WORK/$MARKER" <<'JS'
 // Injected by claude-rtl-patch.sh — applies per-paragraph auto direction
 // (sentence-leading character decides RTL or LTR) to every Claude window.
@@ -263,7 +263,7 @@ app.on('browser-window-created', (_, win) => attach(win.webContents));
 app.on('web-contents-created', (_, wc) => attach(wc));
 JS
 
-  step "Wiring injector into entry point…"
+  step "Wiring injector into entry point..."
   ENTRY="$WORK/.vite/build/index.pre.js"
   [ -f "$ENTRY" ] || die "Entry point not found: $ENTRY (Claude internal layout changed?)"
   if ! grep -q "$MARKER" "$ENTRY"; then
@@ -273,24 +273,28 @@ JS
     } > "$ENTRY.tmp" && mv "$ENTRY.tmp" "$ENTRY"
   fi
 
-  step "Repacking asar…"
+  step "Repacking asar..."
   TMP_ASAR="$(mktemp -t claude-asar-XXXXXX).asar"
   asar_run pack "$WORK" "$TMP_ASAR"
   sudo mv "$TMP_ASAR" "$ASAR"
 
-  step "Updating ElectronAsarIntegrity hash in Info.plist…"
+  step "Updating ElectronAsarIntegrity hash in Info.plist..."
   NEWHASH=$(asar_header_hash)
   sudo /usr/libexec/PlistBuddy -c "Set :ElectronAsarIntegrity:Resources/app.asar:hash $NEWHASH" "$PLIST"
   c_dim "  new header hash: $NEWHASH"
 
-  step "Ad-hoc re-signing the bundle…"
-  sudo codesign --force --deep --sign - "$APP"
+  step "Ad-hoc re-signing the bundle..."
+  sudo codesign --force --sign - --preserve-metadata=identifier,entitlements,flags,runtime "$APP"
   sudo xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 
   rm -rf "$(dirname "$WORK")"
 
   c_green "✓ Patched. Launch Claude — mixed RTL/LTR will now auto-flow per paragraph."
   c_dim   "Revert anytime with: $0 --revert"
+  echo
+  c_yellow "Note: On first launch after patching, macOS may prompt to allow"
+  c_yellow "Claude to access keychain items (auth token, cookies). Click"
+  c_yellow "\"Always Allow\" 2-3 times — it stops after that."
 }
 
 cmd_revert() {
@@ -299,7 +303,7 @@ cmd_revert() {
 
   quit_claude
 
-  step "Restoring original app.asar from $BACKUP_ASAR…"
+  step "Restoring original app.asar from $BACKUP_ASAR..."
   sudo cp "$BACKUP_ASAR" "$ASAR"
 
   if [ -f "$BACKUP_HASH" ] && [ -s "$BACKUP_HASH" ]; then
@@ -307,13 +311,13 @@ cmd_revert() {
     step "Restoring ElectronAsarIntegrity hash → $OLDHASH"
     sudo /usr/libexec/PlistBuddy -c "Set :ElectronAsarIntegrity:Resources/app.asar:hash $OLDHASH" "$PLIST"
   else
-    c_yellow "No saved Info.plist hash; recomputing from restored asar…"
+    c_yellow "No saved Info.plist hash; recomputing from restored asar..."
     OLDHASH=$(asar_header_hash)
     sudo /usr/libexec/PlistBuddy -c "Set :ElectronAsarIntegrity:Resources/app.asar:hash $OLDHASH" "$PLIST"
   fi
 
-  step "Ad-hoc re-signing to keep Gatekeeper happy…"
-  sudo codesign --force --deep --sign - "$APP"
+  step "Ad-hoc re-signing to keep Gatekeeper happy..."
+  sudo codesign --force --sign - --preserve-metadata=identifier,entitlements,flags,runtime "$APP"
   sudo xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 
   c_green "✓ Reverted. Claude is back to its original state."

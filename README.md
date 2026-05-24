@@ -132,6 +132,11 @@ The script detects "not patched", makes a fresh backup of the new asar, and re-a
 
 ## Troubleshooting
 
+**macOS keeps prompting for keychain access when Claude launches.**
+This happens if you applied an *earlier* version of this script that used `codesign --deep`, which re-signed every nested helper as ad-hoc. The current version signs only the outer bundle (preserving Anthropic's signatures on the helpers), so fresh installs don't have this issue. If you already hit it, you have two options:
+1. **Click "Always Allow" 2–3 times** when prompted. After macOS records the new signature against each keychain ACL, the prompts stop.
+2. **Reinstall Claude cleanly:** download a fresh `Claude.app` from [anthropic.com/desktop](https://claude.ai/download), drop it into `/Applications`, then re-run `claude-rtl`.
+
 **"Claude can't be opened because it is from an unidentified developer."**
 The ad-hoc resigning isn't notarized. Run:
 ```bash
