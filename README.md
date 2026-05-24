@@ -8,6 +8,12 @@ One script, one command. Idempotent, fully reversible, and an optional silent au
 
 ---
 
+> ☢️ **Heads up.** This script takes meaningful access — it modifies a system app (`Claude.app`), and with `--auto-install` it also grants itself a passwordless `sudo` rule. Both are tightly scoped to a single file path and nothing wider. I've done my best on the security side: `visudo` validation, root-owned trampoline so user-level processes can't swap what runs, event-driven `WatchPaths` instead of polling, no third-party deps in the hot path — so even if the script were tampered with, the blast radius stays narrow.
+>
+> Still: this is a vibe-coded project. Use at your own risk. Read the script before you run it.
+
+---
+
 ## Install & update
 
 Same one-liner does both — fresh install **or** pulling the latest version:
