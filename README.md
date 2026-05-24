@@ -116,6 +116,30 @@ The script detects "not patched", makes a fresh backup of the new asar, and re-a
 
 **To update the script itself,** re-run the [install & update one-liner](#install--update).
 
+### Auto re-apply on Claude updates (optional)
+
+Tired of running `claude-rtl` after every Claude update? One command turns on a
+LaunchAgent that re-applies the patch silently whenever Claude's auto-updater
+replaces `app.asar`:
+
+```bash
+claude-rtl --auto-install      # enable
+claude-rtl --auto-uninstall    # disable
+```
+
+**How it works.** Creates `~/Library/LaunchAgents/com.claude-rtl.watcher.plist`
+with `WatchPaths` on `/Applications/Claude.app/Contents/Resources/app.asar` →
+event-driven, not polling. Re-applying needs root, so a scoped passwordless rule
+is added to `/etc/sudoers.d/claude-rtl` (limited to exactly this script's path),
+and the script is chowned `root:wheel` so user-level processes can't replace
+what runs. Logs at `~/.claude-rtl-patch/auto.log` (read with `sudo tail`).
+
+**Tradeoff.** The sudoers rule trusts the *path*, not the *content*. Root-owning
+the script closes the user-tamper hole; the cost is that future `--install`
+runs prompt for sudo once to overwrite (still better than once per *apply*).
+Touch ID for sudo via `/etc/pam.d/sudo_local` is a comparable alternative if
+you want a tap-to-confirm per fire instead.
+
 ---
 
 ## Universal compatibility

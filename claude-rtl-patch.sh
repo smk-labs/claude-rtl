@@ -19,6 +19,17 @@
 set -eu
 set -o pipefail
 
+# When the LaunchAgent fires this script via `sudo` (option A in --auto-install),
+# we run as root with HOME=/var/root by default. Re-anchor HOME/USER to the
+# invoking user so $STATE_DIR and friends resolve correctly.
+if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ]; then
+  _REAL_HOME=$(eval echo "~$SUDO_USER")
+  if [ -d "$_REAL_HOME" ]; then
+    export HOME="$_REAL_HOME"
+    export USER="$SUDO_USER"
+  fi
+fi
+
 APP="/Applications/Claude.app"
 RES="$APP/Contents/Resources"
 ASAR="$RES/app.asar"
@@ -28,6 +39,22 @@ BACKUP_ASAR="$STATE_DIR/app.asar.orig"
 BACKUP_HASH="$STATE_DIR/original-hash.txt"
 BACKUP_VERSION="$STATE_DIR/claude-version.txt"
 MARKER="rtl-fix.js"   # presence in asar means "patched"
+
+# Auto-apply (LaunchAgent + scoped sudoers).
+LA_LABEL="com.claude-rtl.watcher"
+LA_DIR="$HOME/Library/LaunchAgents"
+LA_PLIST="$LA_DIR/$LA_LABEL.plist"
+SUDOERS_FILE="/etc/sudoers.d/claude-rtl"
+AUTO_LOG="$STATE_DIR/auto.log"
+
+# If we ran as root via sudo, hand the state dir back to the user on exit
+# so subsequent direct (non-sudo) invocations can still write into it.
+_chown_state_on_exit() {
+  if [ -n "${SUDO_USER:-}" ] && [ -d "$STATE_DIR" ]; then
+    chown -R "$SUDO_USER:staff" "$STATE_DIR" 2>/dev/null || true
+  fi
+}
+trap _chown_state_on_exit EXIT
 
 c_red()    { printf "\033[31m%s\033[0m\n" "$*"; }
 c_green()  { printf "\033[32m%s\033[0m\n" "$*"; }
@@ -121,9 +148,13 @@ asar_run() {
 }
 
 quit_claude() {
+  # Don't issue `tell app to quit` if Claude isn't running — AppleScript
+  # would launch it just to quit it (matters during auto-apply on update).
+  if ! pgrep -x "Claude" >/dev/null 2>&1; then
+    return 0
+  fi
   step "Quitting Claude..."
   osascript -e 'tell application "Claude" to quit' 2>/dev/null || true
-  # Wait up to 5s for it to actually exit
   for _ in 1 2 3 4 5; do
     pgrep -x "Claude" >/dev/null || break
     sleep 1
@@ -340,16 +371,23 @@ cmd_install() {
   #    original (e.g. from ~/Downloads) without breaking the alias.
   #    Always overwrites — `--install` is the "update" path too.
   mkdir -p "$CANONICAL_DIR"
+  # If --auto-install was run, the canonical script is root-owned to prevent
+  # user-level tampering with the sudoers-trusted path. Elevate the cp/chmod.
+  local CP="cp" CHMOD="chmod"
+  if [ -f "$CANONICAL_PATH" ] && [ "$(stat -f '%Su' "$CANONICAL_PATH" 2>/dev/null)" = "root" ]; then
+    CP="sudo cp"; CHMOD="sudo chmod"
+    c_dim "Canonical script is root-owned (auto-apply active) — elevating to update."
+  fi
   if [ "$SOURCE_PATH" = "$CANONICAL_PATH" ]; then
     c_dim "Running from canonical location — script already in place."
   elif [ -f "$CANONICAL_PATH" ]; then
     step "Overwriting existing script → $CANONICAL_PATH"
-    cp -f "$SOURCE_PATH" "$CANONICAL_PATH"
-    chmod +x "$CANONICAL_PATH"
+    $CP -f "$SOURCE_PATH" "$CANONICAL_PATH"
+    $CHMOD 755 "$CANONICAL_PATH"
   else
     step "Installing script → $CANONICAL_PATH"
-    cp "$SOURCE_PATH" "$CANONICAL_PATH"
-    chmod +x "$CANONICAL_PATH"
+    $CP "$SOURCE_PATH" "$CANONICAL_PATH"
+    $CHMOD +x "$CANONICAL_PATH"
   fi
 
   # 2) Wire up the zshrc alias (pointing at the canonical copy).
@@ -390,6 +428,93 @@ cmd_uninstall() {
   c_green "✓ Removed. Open a new terminal for it to take effect."
 }
 
+cmd_auto_install() {
+  ensure_prereqs
+  if [ ! -f "$CANONICAL_PATH" ]; then
+    die "Run --install first ($CANONICAL_PATH not found)."
+  fi
+
+  # 1) Sudoers rule: scoped, NOPASSWD, exact path. Validate before installing.
+  step "Writing sudoers rule → $SUDOERS_FILE"
+  local OWNER
+  OWNER="${SUDO_USER:-$USER}"
+  local TMP_SUDOERS
+  TMP_SUDOERS=$(mktemp)
+  cat > "$TMP_SUDOERS" <<EOF
+# claude-rtl: auto-re-apply patch after Claude updates without password prompt.
+# Scope: exactly this one script path. The script is root-owned (see below)
+# so user-level processes cannot replace what runs here.
+$OWNER ALL=(root) NOPASSWD: $CANONICAL_PATH
+EOF
+  if ! sudo visudo -cf "$TMP_SUDOERS" >/dev/null; then
+    rm -f "$TMP_SUDOERS"
+    die "Generated sudoers file failed visudo validation."
+  fi
+  sudo install -o root -g wheel -m 0440 "$TMP_SUDOERS" "$SUDOERS_FILE"
+  rm -f "$TMP_SUDOERS"
+
+  # 2) Root-own the canonical script so user-level malware can't poison it.
+  step "Root-owning canonical script (tamper-resistance)..."
+  sudo chown root:wheel "$CANONICAL_PATH"
+  sudo chmod 755 "$CANONICAL_PATH"
+
+  # 3) LaunchAgent with WatchPaths: fires only when Claude's auto-updater
+  #    replaces app.asar. RunAtLoad=false so loading this doesn't re-apply.
+  step "Writing LaunchAgent → $LA_PLIST"
+  mkdir -p "$LA_DIR"
+  mkdir -p "$STATE_DIR"
+  cat > "$LA_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTD/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LA_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/sudo</string>
+    <string>-n</string>
+    <string>$CANONICAL_PATH</string>
+  </array>
+  <key>WatchPaths</key>
+  <array><string>$ASAR</string></array>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>$AUTO_LOG</string>
+  <key>StandardErrorPath</key><string>$AUTO_LOG</string>
+</dict>
+</plist>
+EOF
+
+  step "Loading LaunchAgent..."
+  launchctl bootout "gui/$(id -u)/$LA_LABEL" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$LA_PLIST" \
+    || die "launchctl bootstrap failed for $LA_LABEL"
+
+  c_green "✓ Auto-apply enabled."
+  c_dim "Whenever Claude's auto-updater replaces app.asar, the patch re-applies silently."
+  c_dim "Log: $AUTO_LOG  (tail with: sudo tail -f $AUTO_LOG)"
+  c_dim "Disable with: $0 --auto-uninstall"
+}
+
+cmd_auto_uninstall() {
+  step "Unloading LaunchAgent..."
+  launchctl bootout "gui/$(id -u)/$LA_LABEL" 2>/dev/null || true
+  [ -f "$LA_PLIST" ] && rm -f "$LA_PLIST"
+
+  if [ -f "$SUDOERS_FILE" ]; then
+    step "Removing sudoers rule → $SUDOERS_FILE"
+    sudo rm -f "$SUDOERS_FILE"
+  fi
+
+  if [ -f "$CANONICAL_PATH" ] && [ "$(stat -f '%Su' "$CANONICAL_PATH" 2>/dev/null)" = "root" ]; then
+    step "Restoring script ownership to ${SUDO_USER:-$USER}..."
+    sudo chown "${SUDO_USER:-$USER}:staff" "$CANONICAL_PATH"
+    sudo chmod 755 "$CANONICAL_PATH"
+  fi
+
+  c_green "✓ Auto-apply disabled."
+  c_dim "Patch state unchanged. Run --revert if you also want to undo the patch itself."
+}
+
 cmd_help() {
   cat <<EOF
 Claude Desktop RTL patch (macOS)
@@ -398,27 +523,31 @@ Makes mixed RTL/LTR text (Persian, Arabic, Hebrew + English) auto-direct
 per paragraph. First strong character decides direction.
 
 Usage:
-  $0                  apply the patch (idempotent; safe to re-run)
-  $0 --revert         restore the original Claude.app
-  $0 --status         show current state and backup info
-  $0 --install        add 'claude-rtl' shortcut to ~/.zshrc
-  $0 --uninstall      remove the 'claude-rtl' shortcut from ~/.zshrc
-  $0 --help           this message
+  $0                    apply the patch (idempotent; safe to re-run)
+  $0 --revert           restore the original Claude.app
+  $0 --status           show current state and backup info
+  $0 --install          add 'claude-rtl' shortcut to ~/.zshrc
+  $0 --uninstall        remove the 'claude-rtl' shortcut from ~/.zshrc
+  $0 --auto-install     auto-re-apply on Claude updates (LaunchAgent + scoped sudoers)
+  $0 --auto-uninstall   remove the LaunchAgent and sudoers rule
+  $0 --help             this message
 
 Notes:
   - Requires sudo (writes into /Applications/Claude.app).
   - Backup of the original app.asar is saved in: $STATE_DIR
   - Re-signs the bundle ad-hoc (Apple notarization is lost, locally-only fine).
-  - When Claude auto-updates, the patch is wiped — just re-run this script.
+  - --auto-install root-owns this script; future --install runs elevate automatically.
 EOF
 }
 
 case "${1:-apply}" in
-  apply|"")       cmd_apply ;;
-  --revert|-r)    cmd_revert ;;
-  --status|-s)    cmd_status ;;
-  --install|-i)   cmd_install ;;
-  --uninstall|-u) cmd_uninstall ;;
-  --help|-h)      cmd_help ;;
-  *)              cmd_help; exit 1 ;;
+  apply|"")            cmd_apply ;;
+  --revert|-r)         cmd_revert ;;
+  --status|-s)         cmd_status ;;
+  --install|-i)        cmd_install ;;
+  --uninstall|-u)      cmd_uninstall ;;
+  --auto-install)      cmd_auto_install ;;
+  --auto-uninstall)    cmd_auto_uninstall ;;
+  --help|-h)           cmd_help ;;
+  *)                   cmd_help; exit 1 ;;
 esac
