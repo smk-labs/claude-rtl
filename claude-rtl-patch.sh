@@ -310,7 +310,10 @@ JS
 
   step "Repacking asar..."
   TMP_ASAR="$(mktemp -t claude-asar-XXXXXX).asar"
-  asar_run pack "$WORK" "$TMP_ASAR"
+  # Preserve files Electron loads from disk (native *.node modules + node-pty's
+  # spawn-helper). Without --unpack they get packed INTO the asar, where Electron
+  # cannot dlopen them, so the main process throws on launch and Claude never opens.
+  asar_run pack "$WORK" "$TMP_ASAR" --unpack "{*.node,spawn-helper}"
   sudo mv "$TMP_ASAR" "$ASAR"
 
   step "Updating ElectronAsarIntegrity hash in Info.plist..."
@@ -319,7 +322,12 @@ JS
   c_dim "  new header hash: $NEWHASH"
 
   step "Ad-hoc re-signing the bundle..."
-  sudo codesign --force --sign - --preserve-metadata=identifier,entitlements,flags,runtime "$APP"
+  # Drop restricted entitlements (application-identifier, team-identifier,
+  # keychain-access-groups). They are only valid under Anthropic's team signature,
+  # so on an ad-hoc signature macOS 15+/26 AMFI refuses to spawn the app ("Launchd
+  # job spawn failed", RBSRequestErrorDomain 5 / NSPOSIXErrorDomain 163). --deep
+  # re-signs nested code too. Trade-off: you may need to sign in to Claude again.
+  sudo codesign --force --deep --sign - "$APP"
   sudo xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 
   rm -rf "$(dirname "$WORK")"
@@ -352,7 +360,12 @@ cmd_revert() {
   fi
 
   step "Ad-hoc re-signing to keep Gatekeeper happy..."
-  sudo codesign --force --sign - --preserve-metadata=identifier,entitlements,flags,runtime "$APP"
+  # Drop restricted entitlements (application-identifier, team-identifier,
+  # keychain-access-groups). They are only valid under Anthropic's team signature,
+  # so on an ad-hoc signature macOS 15+/26 AMFI refuses to spawn the app ("Launchd
+  # job spawn failed", RBSRequestErrorDomain 5 / NSPOSIXErrorDomain 163). --deep
+  # re-signs nested code too. Trade-off: you may need to sign in to Claude again.
+  sudo codesign --force --deep --sign - "$APP"
   sudo xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 
   c_green "✓ Reverted. Claude is back to its original state."
