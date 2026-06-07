@@ -247,10 +247,12 @@ const CSS = `
     unicode-bidi: plaintext !important;
     text-align: start !important;
   }
-  /* Rendered text: same treatment, per block */
+  /* Rendered text, per block — chat AND non-chat UI (question/options dialogs,
+     menus, tooltips). Generic block containers are included so anything Claude
+     renders flows per-paragraph, not just message bubbles. plaintext is a no-op
+     on pure-container blocks and on English-only text, so this stays safe. */
   p, li, blockquote, h1, h2, h3, h4, h5, h6,
-  .prose, .markdown, .message, .message-content,
-  [class*="message"] p, [class*="message"] li {
+  div, button, label, summary, td, th, dd, dt, figcaption {
     unicode-bidi: plaintext !important;
   }
   /* Code stays LTR no matter what */
