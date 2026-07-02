@@ -1,5 +1,10 @@
 # claude-rtl
 
+> [!TIP]
+> **Most people should start with [parsi](https://github.com/smk-labs/claude-plugins/tree/main/plugins/parsi) instead.** claude-rtl works by patching `Claude.app` itself, and that carries real costs: it needs `sudo`, it modifies a system app, and **every Claude auto-update silently wipes the patch**, so you either re-run it by hand or grant a passwordless-sudo LaunchAgent to re-apply it for you. parsi has none of these problems. It is a plain Claude Code plugin: one hook styles Claude's replies as proper RTL cards (Vazirmatn, per-paragraph direction, LTR-isolated code) at near zero token cost. No app patching, no sudo, nothing breaks on update, and it survives any Claude version.
+>
+> Keep claude-rtl for the one thing only an app patch can fix: the direction of the text **you type** and of everything else in the app's UI. The two are complementary; parsi covers the day-to-day pain (Claude's replies) the safe way.
+
 **Fix the RTL bug in Claude Desktop on macOS.** Mixed Persian / Arabic / Hebrew + English text now flows correctly per paragraph — the first strong character of each block decides direction, automatically, everywhere in the app. Code blocks stay LTR.
 
 <!-- screenshots / GIFs go here -->
